@@ -1,8 +1,11 @@
 class UI {
-    constructor(game) {
+    constructor(game, tgAPI, cloud) {
         this.game = game;
+        this.tg = tgAPI;
+        this.cloud = cloud;
         this.particles = [];
         this.missionCompletedCache = {};
+        this.leaderboardVisible = false;
     }
     
     init() {
@@ -13,10 +16,16 @@ class UI {
         this.startGameLoop();
         this.showPopups();
         this.addOrbitRing();
+        
+        // Обновляем лидерборд при загрузке
+        if (this.tg.isTelegram) {
+            this.cloud.updateLeaderboard(this.game.state);
+        }
     }
     
     addOrbitRing() {
         const clickArea = document.querySelector('.click-area');
+        if (!clickArea) return;
         const ring = document.createElement('div');
         ring.className = 'orbit-ring';
         clickArea.appendChild(ring);
@@ -29,9 +38,18 @@ class UI {
                 document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
                 btn.classList.add('active');
                 const tabContent = document.getElementById(`tab-${btn.dataset.tab}`);
-                tabContent.classList.add('active');
+                if (tabContent) {
+                    tabContent.classList.add('active');
+                }
                 
                 this.renderTabContent(btn.dataset.tab);
+                
+                // Показываем BackButton в Telegram если не на главной
+                if (btn.dataset.tab !== 'main' && this.tg?.tg?.BackButton) {
+                    this.tg.tg.BackButton.show();
+                } else if (this.tg?.tg?.BackButton) {
+                    this.tg.tg.BackButton.hide();
+                }
             });
         });
     }
@@ -43,11 +61,13 @@ class UI {
             case 'missions': this.renderMissionsTab(); break;
             case 'prestige': this.renderPrestige(); break;
             case 'settings': this.renderSettings(); break;
+            case 'main': break;
         }
     }
     
     bindClick() {
         const target = document.getElementById('click-target');
+        if (!target) return;
         
         const handleClick = (e) => {
             e.preventDefault();
@@ -56,6 +76,11 @@ class UI {
             this.spawnParticles(pos.x, pos.y, earned);
             this.updateTopBar();
             this.checkRareDrop();
+            
+            // Тактильная отдача
+            if (this.tg) {
+                this.tg.hapticImpact('light');
+            }
         };
         
         target.addEventListener('click', handleClick);
@@ -71,6 +96,8 @@ class UI {
     
     spawnParticles(x, y, amount, type = 'gold') {
         const container = document.getElementById('particles');
+        if (!container) return;
+        
         const count = 6;
         
         for (let i = 0; i < count; i++) {
@@ -96,7 +123,6 @@ class UI {
             
             container.appendChild(particle);
             
-            // Анимация через requestAnimationFrame для плавности
             requestAnimationFrame(() => {
                 particle.style.transition = 'all 1.2s cubic-bezier(0.25, 0.46, 0.45, 0.94)';
                 particle.style.transform = `translate(calc(-50% + ${tx}px), calc(-50% + ${ty}px))`;
@@ -112,14 +138,21 @@ class UI {
         if (Math.random() < 0.01) {
             this.game.state.gems++;
             const target = document.getElementById('click-target');
-            const rect = target.getBoundingClientRect();
-            this.spawnParticles(
-                rect.left + rect.width / 2,
-                rect.top + rect.height / 2,
-                1,
-                'gem'
-            );
+            if (target) {
+                const rect = target.getBoundingClientRect();
+                this.spawnParticles(
+                    rect.left + rect.width / 2,
+                    rect.top + rect.height / 2,
+                    1,
+                    'gem'
+                );
+            }
             this.showToast('💎 Найден редкий самоцвет!');
+            
+            // Тактильная отдача для редкого дропа
+            if (this.tg) {
+                this.tg.hapticImpact('heavy');
+            }
         }
     }
     
@@ -127,22 +160,31 @@ class UI {
         const goldEl = document.getElementById('gold-amount');
         const gemsEl = document.getElementById('gems-amount');
         
-        const newGold = this.formatNumber(this.game.state.gold);
-        const newGems = this.formatNumber(this.game.state.gems);
-        
-        if (goldEl.textContent !== newGold) {
-            goldEl.textContent = newGold;
-            document.getElementById('gold-display').classList.add('gain');
-            setTimeout(() => document.getElementById('gold-display').classList.remove('gain'), 300);
+        if (goldEl) {
+            const newGold = this.formatNumber(this.game.state.gold);
+            if (goldEl.textContent !== newGold) {
+                goldEl.textContent = newGold;
+                const goldDisplay = document.getElementById('gold-display');
+                if (goldDisplay) {
+                    goldDisplay.classList.add('gain');
+                    setTimeout(() => goldDisplay.classList.remove('gain'), 300);
+                }
+            }
         }
         
-        gemsEl.textContent = newGems;
+        if (gemsEl) {
+            gemsEl.textContent = this.formatNumber(this.game.state.gems);
+        }
     }
     
     updateStats() {
-        document.getElementById('gps-display').textContent = this.formatNumber(this.game.gps);
-        document.getElementById('cpc-display').textContent = this.formatNumber(this.game.cpc);
-        document.getElementById('streak-display').textContent = this.game.state.streak;
+        const gpsEl = document.getElementById('gps-display');
+        const cpcEl = document.getElementById('cpc-display');
+        const streakEl = document.getElementById('streak-display');
+        
+        if (gpsEl) gpsEl.textContent = this.formatNumber(this.game.gps);
+        if (cpcEl) cpcEl.textContent = this.formatNumber(this.game.cpc);
+        if (streakEl) streakEl.textContent = this.game.state.streak;
     }
     
     render() {
@@ -184,6 +226,37 @@ class UI {
         }
         
         container.innerHTML = html;
+        
+        // Обновляем бейдж на вкладке Missions
+        this.updateMissionsBadge();
+    }
+    
+    updateMissionsBadge() {
+        const missionsBtn = document.querySelector('[data-tab="missions"]');
+        if (!missionsBtn) return;
+        
+        // Считаем завершённые, но не собранные миссии
+        let readyToClaim = 0;
+        for (const mission of CONFIG.MISSIONS) {
+            if (!this.game.state.missionsCompleted[mission.id]) {
+                const progress = this.getMissionProgress(mission);
+                if (progress >= mission.target) {
+                    readyToClaim++;
+                }
+            }
+        }
+        
+        // Удаляем старый бейдж
+        const oldBadge = missionsBtn.querySelector('.tab-badge');
+        if (oldBadge) oldBadge.remove();
+        
+        // Добавляем новый если есть что забирать
+        if (readyToClaim > 0) {
+            const badge = document.createElement('span');
+            badge.className = 'tab-badge';
+            badge.textContent = readyToClaim;
+            missionsBtn.appendChild(badge);
+        }
     }
     
     renderMissionsTab() {
@@ -254,6 +327,11 @@ class UI {
         this.game.state.gold += mission.reward;
         this.game.state.totalGoldEarned += mission.reward;
         
+        // Тактильная отдача
+        if (this.tg) {
+            this.tg.hapticImpact('heavy');
+        }
+        
         // Эффект
         this.showToast(`🎉 Задание выполнено! +${this.formatNumber(mission.reward)} 🪙`);
         
@@ -295,6 +373,8 @@ class UI {
             box-shadow: 0 8px 32px rgba(0,0,0,0.5);
             border: 1px solid var(--accent);
             animation: bounceIn 0.5s ease;
+            max-width: 90%;
+            text-align: center;
         `;
         
         document.body.appendChild(toast);
@@ -309,6 +389,8 @@ class UI {
     
     renderGenerators() {
         const container = document.getElementById('tab-generators');
+        if (!container) return;
+        
         let html = '<h2>🏗️ Генераторы</h2>';
         
         CONFIG.GENERATORS.forEach((gen, index) => {
@@ -316,12 +398,15 @@ class UI {
             const cost = GeneratorsManager.getCost(gen.id, this.game);
             const production = GeneratorsManager.getProduction(gen.id, this.game);
             const canBuy = this.game.state.gold >= cost;
+            const nameParts = gen.name.split(' ');
+            const icon = nameParts[0];
+            const name = nameParts.slice(1).join(' ');
             
             html += `
                 <div class="generator-card" style="animation-delay:${index * 0.05}s">
-                    <div class="gen-icon">${gen.name.split(' ')[0]}</div>
+                    <div class="gen-icon">${icon}</div>
                     <div class="gen-info">
-                        <span class="gen-name">${gen.name.split(' ').slice(1).join(' ')}</span>
+                        <span class="gen-name">${name}</span>
                         <span class="gen-owned">Владею: ${owned}</span>
                         <span class="gen-prod">+${this.formatNumber(production)}/сек</span>
                     </div>
@@ -338,6 +423,8 @@ class UI {
     
     renderUpgrades() {
         const container = document.getElementById('tab-upgrades');
+        if (!container) return;
+        
         let html = '<h2>⬆️ Улучшения</h2>';
         
         CONFIG.UPGRADES.forEach((upgrade, index) => {
@@ -346,14 +433,15 @@ class UI {
             const canBuy = this.game.state.gold >= cost;
             const appliesToText = upgrade.appliesTo === 'click' ? 'Клик' : 
                                  upgrade.appliesTo === 'all' ? 'Всё' : 
-                                 CONFIG.GENERATORS.find(g => g.id === upgrade.appliesTo)?.name || upgrade.appliesTo;
+                                 CONFIG.GENERATORS.find(g => g.id === upgrade.appliesTo)?.name?.split(' ').slice(1).join(' ') || upgrade.appliesTo;
+            const multiplier = Math.pow(upgrade.multiplier, level);
             
             html += `
                 <div class="upgrade-card" style="animation-delay:${index * 0.05}s">
                     <div class="gen-icon">⬆️</div>
                     <div class="gen-info">
                         <span class="gen-name">${upgrade.name}</span>
-                        <span class="gen-owned">Уровень: ${level} | Множитель: x${Math.pow(upgrade.multiplier, level)}</span>
+                        <span class="gen-owned">Уровень: ${level} | Множитель: x${multiplier}</span>
                         <span class="gen-prod">Применяется: ${appliesToText}</span>
                     </div>
                     <button class="buy-btn ${canBuy ? '' : 'disabled'}" 
@@ -369,12 +457,14 @@ class UI {
     
     renderPrestige() {
         const container = document.getElementById('tab-prestige');
+        if (!container) return;
+        
         const canPrestige = this.game.canPrestige();
-        const progress = (this.game.state.totalGoldEarned / CONFIG.PRESTIGE_COST) * 100;
+        const progress = Math.min(100, (this.game.state.totalGoldEarned / CONFIG.PRESTIGE_COST) * 100);
         
         container.innerHTML = `
+            <h2>🌟 Престиж</h2>
             <div class="prestige-info">
-                <h2>🌟 Престиж</h2>
                 <div class="prestige-level">${this.game.state.prestigeLevel}</div>
                 <p style="color:var(--text-secondary);">Текущий уровень</p>
                 <div style="margin:20px 0;">
@@ -382,7 +472,7 @@ class UI {
                     <p>Самоцветов: <strong style="color:var(--accent-purple);">${this.game.state.gems} 💎</strong></p>
                 </div>
                 <div class="progress-bar" style="margin:16px 0;">
-                    <div class="progress-fill" style="width:${Math.min(100, progress)}%; background: linear-gradient(90deg, var(--accent-purple), var(--accent-pink));"></div>
+                    <div class="progress-fill" style="width:${progress}%; background: linear-gradient(90deg, var(--accent-purple), var(--accent-pink));"></div>
                 </div>
                 <p style="font-size:13px;color:var(--text-secondary);">${this.formatNumber(this.game.state.totalGoldEarned)} / ${this.formatNumber(CONFIG.PRESTIGE_COST)} 🪙</p>
                 <p style="margin:12px 0;color:var(--accent-red);">⚠️ Сбросит весь прогресс кроме самоцветов!</p>
@@ -395,81 +485,283 @@ class UI {
     
     renderSettings() {
         const container = document.getElementById('tab-settings');
+        if (!container) return;
+        
+        const saveSize = Storage.getSaveSize();
+        
         container.innerHTML = `
             <h2>⚙️ Настройки</h2>
-            <div style="background:var(--bg-secondary);border-radius:var(--radius);padding:16px;margin:10px 0;">
-                <p><strong>Версия:</strong> 2.0.0</p>
-                <p><strong>ID:</strong> ${tg?.initDataUnsafe?.user?.id || 'N/A'}</p>
-                <p><strong>Сохранений:</strong> localStorage</p>
+            
+            <div class="player-card" style="background:var(--bg-secondary);border-radius:var(--radius);padding:16px;margin:10px 0;display:flex;align-items:center;gap:12px;">
+                <div style="width:48px;height:48px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:20px;">
+                    ${this.tg.isPremium() ? '👑' : '🎮'}
+                </div>
+                <div>
+                    <div style="font-weight:700;">${this.tg.user?.first_name || 'Игрок'} ${this.tg.isPremium() ? '⭐' : ''}</div>
+                    <div style="font-size:13px;color:var(--text-secondary);">
+                        @${this.tg.user?.username || 'player'}
+                        ${this.tg.isPremium() ? ' · Telegram Premium' : ''}
+                    </div>
+                </div>
             </div>
-            <button class="settings-btn" onclick="Storage.save(window.ui.game.state); window.ui.showToast('💾 Прогресс сохранён!')">
-                💾 Сохранить вручную
+            
+            <div style="background:var(--bg-secondary);border-radius:var(--radius);padding:16px;margin:10px 0;">
+                <p><strong>🆔 ID:</strong> ${this.tg.user?.id || 'N/A'}</p>
+                <p><strong>📱 Платформа:</strong> ${this.tg.platform}</p>
+                <p><strong>🌐 WebApp:</strong> v${this.tg.version}</p>
+                <p><strong>💾 Локальное сохранение:</strong> ${saveSize}</p>
+                <p><strong>💎 Telegram Premium:</strong> ${this.tg.isPremium() ? 'Да' : 'Нет'}</p>
+            </div>
+            
+            <button class="settings-btn" onclick="window.ui.saveManually()">
+                💾 Сохранить сейчас
             </button>
+            
+            <button class="settings-btn" onclick="window.ui.saveToCloud()">
+                ☁️ Сохранить в облако
+            </button>
+            
+            <button class="settings-btn" onclick="window.ui.showLeaderboard()">
+                🏆 Таблица лидеров
+            </button>
+            
+            <button class="settings-btn" onclick="window.ui.shareGame()">
+                📤 Поделиться игрой
+            </button>
+            
+            <button class="settings-btn" onclick="window.ui.inviteFriend()">
+                👥 Пригласить друга
+            </button>
+            
+            <button class="settings-btn" onclick="window.ui.openChannel()">
+                📢 Наш канал
+            </button>
+            
             <button class="settings-btn" onclick="window.ui.exportSave()">
                 📋 Экспорт сохранения
             </button>
-            <button class="settings-btn danger" onclick="if(confirm('Точно сбросить ВЕСЬ прогресс?')){Storage.reset();location.reload();}">
+            
+            <button class="settings-btn danger" onclick="window.ui.resetWithConfirm()">
                 🗑️ Сбросить прогресс
             </button>
+            
+            <div id="leaderboard-container" style="margin-top:16px;"></div>
         `;
+    }
+    
+    saveManually() {
+        Storage.save(this.game.state);
+        if (this.tg) this.tg.hapticImpact('medium');
+        this.showToast('💾 Сохранено локально!');
+        this.renderSettings();
+    }
+    
+    saveToCloud() {
+        if (!this.tg.isTelegram) {
+            this.showToast('⚠️ Доступно только в Telegram');
+            return;
+        }
+        
+        this.cloud.saveToCloud(this.game.state);
+        if (this.tg) this.tg.hapticImpact('heavy');
+        this.showToast('☁️ Сохранено в облаке!');
+    }
+    
+    showLeaderboard() {
+        const container = document.getElementById('leaderboard-container');
+        if (!container) return;
+        
+        const leaderboard = this.cloud.getFakeLeaderboard(this.game);
+        
+        // Обновляем в облаке
+        if (this.tg.isTelegram) {
+            this.cloud.updateLeaderboard(this.game.state);
+        }
+        
+        let html = '<h3 style="margin-top:16px;">🏆 Таблица лидеров</h3>';
+        
+        leaderboard.forEach((player, index) => {
+            const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
+            const isMe = player.name === 'Вы' || player.isCurrentUser;
+            
+            html += `
+                <div style="background:${isMe ? 'var(--bg-tertiary)' : 'var(--bg-secondary)'};border-radius:var(--radius-sm);padding:12px;margin:6px 0;display:flex;align-items:center;gap:10px;border:1px solid ${isMe ? 'var(--accent)' : 'var(--border)'};">
+                    <div style="font-size:24px;width:40px;text-align:center;">${medal}</div>
+                    <div style="flex:1;">
+                        <div style="font-weight:700;${isMe ? 'color:var(--accent);' : ''}">
+                            ${player.premium ? '👑 ' : ''}${player.name} ${isMe ? '(Вы)' : ''}
+                        </div>
+                        <div style="font-size:12px;color:var(--text-secondary);">
+                            Престиж: ${player.prestige} · Стрик: ${player.streak} дн.
+                        </div>
+                    </div>
+                    <div style="font-weight:700;color:var(--accent);">
+                        ${this.formatNumber(player.score)} 🪙
+                    </div>
+                </div>
+            `;
+        });
+        
+        html += `
+            <p style="text-align:center;margin-top:8px;font-size:12px;color:var(--text-secondary);">
+                Обновляется каждый час · Игроков: ${leaderboard.length}
+            </p>
+        `;
+        
+        container.innerHTML = html;
+        container.scrollIntoView({ behavior: 'smooth' });
+        
+        if (this.tg) this.tg.hapticImpact('light');
+    }
+    
+    shareGame() {
+        const text = '🎮 Idle Empire — зарабатывай золото даже в оффлайне! Присоединяйся!';
+        const url = 'https://t.me/IdleEmpireBot/start';
+        
+        if (this.tg.isTelegram) {
+            if (this.tg.tg?.shareToStory) {
+                this.tg.shareToStory('', text, url);
+            } else {
+                this.tg.openTelegramLink(`share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(text)}`);
+            }
+        } else {
+            navigator.clipboard?.writeText(`${text} ${url}`);
+            this.showToast('📋 Ссылка скопирована!');
+        }
+        
+        if (this.tg) this.tg.hapticImpact('medium');
+    }
+    
+    inviteFriend() {
+        if (this.tg.isTelegram) {
+            this.tg.openTelegramLink('share/url?url=' + encodeURIComponent('https://t.me/IdleEmpireBot/start'));
+        }
+    }
+    
+    openChannel() {
+        if (this.tg.isTelegram) {
+            this.tg.openTelegramLink('IdleEmpireChannel');
+        } else {
+            window.open('https://t.me/IdleEmpireChannel', '_blank');
+        }
+    }
+    
+    resetWithConfirm() {
+        if (this.tg.isTelegram) {
+            this.tg.showConfirm('Вы уверены, что хотите сбросить ВЕСЬ прогресс? Это действие необратимо!', (confirmed) => {
+                if (confirmed) {
+                    Storage.reset();
+                    if (this.tg) this.tg.hapticImpact('heavy');
+                    this.tg.showAlert('Прогресс сброшен! Игра перезапустится.', () => {
+                        location.reload();
+                    });
+                }
+            });
+        } else {
+            if (confirm('Вы уверены, что хотите сбросить ВЕСЬ прогресс? Это действие необратимо!')) {
+                Storage.reset();
+                location.reload();
+            }
+        }
     }
     
     exportSave() {
         const data = JSON.stringify(this.game.state, null, 2);
-        navigator.clipboard?.writeText(data);
-        this.showToast('📋 Сохранение скопировано в буфер!');
+        if (navigator.clipboard) {
+            navigator.clipboard.writeText(data).then(() => {
+                this.showToast('📋 Сохранение скопировано в буфер!');
+            }).catch(() => {
+                this.showToast('❌ Не удалось скопировать');
+            });
+        } else {
+            this.showToast('📋 Сохранение: ' + data.substring(0, 100) + '...');
+        }
     }
     
     showPopups() {
         const offlineEarned = this.game.processOffline();
         if (offlineEarned > 0) {
-            const mins = Math.floor(this.game.state.offlineTime / 60);
-            const secs = this.game.state.offlineTime % 60;
-            
-            document.getElementById('offline-amount').innerHTML = `+${this.formatNumber(offlineEarned)} 🪙`;
-            document.getElementById('offline-time').textContent = 
-                mins > 0 ? `${mins} мин ${secs} сек` : `${secs} сек`;
-            document.getElementById('offline-popup').style.display = 'block';
-            
-            document.getElementById('claim-offline').onclick = () => {
-                this.game.state.gold += offlineEarned;
-                this.game.state.totalGoldEarned += offlineEarned;
-                document.getElementById('offline-popup').style.animation = 'slideIn 0.3s ease reverse';
-                setTimeout(() => {
-                    document.getElementById('offline-popup').style.display = 'none';
-                }, 300);
-                this.updateTopBar();
-                Storage.save(this.game.state);
-            };
+            this.showOfflinePopup(offlineEarned);
         }
         
         if (this.game.checkDailyLogin()) {
             const reward = this.game.getDailyReward();
             const dayIndex = Math.min(this.game.state.streak, CONFIG.DAILY_REWARDS.length - 1);
             
-            document.getElementById('daily-day').textContent = dayIndex + 1;
-            document.getElementById('daily-amount').innerHTML = `+${this.formatNumber(reward)} 🪙`;
-            document.getElementById('daily-popup').style.display = 'block';
+            const dailyPopup = document.getElementById('daily-popup');
+            const dailyDay = document.getElementById('daily-day');
+            const dailyAmount = document.getElementById('daily-amount');
+            const claimDailyBtn = document.getElementById('claim-daily');
             
-            document.getElementById('claim-daily').onclick = () => {
-                this.game.state.gold += reward;
-                this.game.state.totalGoldEarned += reward;
-                document.getElementById('daily-popup').style.animation = 'slideIn 0.3s ease reverse';
-                setTimeout(() => {
-                    document.getElementById('daily-popup').style.display = 'none';
-                }, 300);
-                this.updateTopBar();
-                Storage.save(this.game.state);
-            };
+            if (dailyPopup && dailyDay && dailyAmount && claimDailyBtn) {
+                dailyDay.textContent = dayIndex + 1;
+                dailyAmount.innerHTML = `+${this.formatNumber(reward)} 🪙`;
+                dailyPopup.style.display = 'block';
+                
+                claimDailyBtn.onclick = () => {
+                    this.game.state.gold += reward;
+                    this.game.state.totalGoldEarned += reward;
+                    dailyPopup.style.animation = 'slideIn 0.3s ease reverse';
+                    setTimeout(() => {
+                        dailyPopup.style.display = 'none';
+                    }, 300);
+                    this.updateTopBar();
+                    Storage.save(this.game.state);
+                    
+                    if (this.tg) this.tg.hapticImpact('medium');
+                };
+            }
+        }
+    }
+    
+    showOfflinePopup(offlineEarned) {
+        if (offlineEarned <= 0) return;
+        
+        const offlinePopup = document.getElementById('offline-popup');
+        const offlineAmount = document.getElementById('offline-amount');
+        const offlineTime = document.getElementById('offline-time');
+        const claimOfflineBtn = document.getElementById('claim-offline');
+        
+        if (!offlinePopup || !offlineAmount || !offlineTime || !claimOfflineBtn) return;
+        
+        const mins = Math.floor(this.game.state.offlineTime / 60);
+        const secs = this.game.state.offlineTime % 60;
+        
+        offlineAmount.innerHTML = `+${this.formatNumber(offlineEarned)} 🪙`;
+        offlineTime.textContent = 
+            mins > 0 ? `${mins} мин ${secs} сек` : `${secs} сек`;
+        offlinePopup.style.display = 'block';
+        
+        claimOfflineBtn.onclick = () => {
+            this.game.state.gold += offlineEarned;
+            this.game.state.totalGoldEarned += offlineEarned;
+            offlinePopup.style.animation = 'slideIn 0.3s ease reverse';
+            setTimeout(() => {
+                offlinePopup.style.display = 'none';
+            }, 300);
+            this.updateTopBar();
+            Storage.save(this.game.state);
+            
+            if (this.tg) this.tg.hapticImpact('medium');
+        };
+    }
+    
+    handleCloudData(data) {
+        if (data && data.type === 'save_loaded') {
+            this.showToast('☁️ Данные из облака загружены');
         }
     }
     
     buyGen(genId) {
+        const event = window.event;
         const card = event?.target?.closest('.generator-card');
+        
         if (GeneratorsManager.buyGen(genId, this.game)) {
             this.updateTopBar();
             this.renderGenerators();
             this.render();
+            
+            if (this.tg) this.tg.hapticImpact('light');
             
             // Анимация успешной покупки
             if (card) {
@@ -495,17 +787,32 @@ class UI {
             this.renderUpgrades();
             this.render();
             this.showToast('⬆️ Улучшение куплено!');
+            
+            if (this.tg) this.tg.hapticImpact('medium');
         }
     }
     
     doPrestige() {
         if (this.game.prestige()) {
+            if (this.tg) {
+                this.tg.hapticImpact('heavy');
+                this.tg.showAlert('🌟 Престиж выполнен! Множитель удвоен!');
+            }
+            
             this.showToast('🌟 Престиж выполнен! Множитель удвоен!');
             this.render();
+            
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-            document.querySelector('[data-tab="main"]').classList.add('active');
+            const mainBtn = document.querySelector('[data-tab="main"]');
+            if (mainBtn) mainBtn.classList.add('active');
+            
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-            document.getElementById('tab-main').classList.add('active');
+            const mainTab = document.getElementById('tab-main');
+            if (mainTab) mainTab.classList.add('active');
+            
+            if (this.tg?.tg?.BackButton) {
+                this.tg.tg.BackButton.hide();
+            }
         }
     }
     
@@ -513,24 +820,31 @@ class UI {
         setInterval(() => {
             this.render();
             const activeTab = document.querySelector('.tab-content.active');
-            if (activeTab?.id === 'tab-generators') this.renderGenerators();
-            if (activeTab?.id === 'tab-upgrades') this.renderUpgrades();
-            if (activeTab?.id === 'tab-missions') this.renderMissionsTab();
+            if (activeTab) {
+                switch(activeTab.id) {
+                    case 'tab-generators': this.renderGenerators(); break;
+                    case 'tab-upgrades': this.renderUpgrades(); break;
+                    case 'tab-missions': this.renderMissionsTab(); break;
+                    case 'tab-prestige': this.renderPrestige(); break;
+                }
+            }
         }, 1000);
     }
     
     startGameLoop() {
-        const TICK_RATE = 0.1;
+        const TICK_RATE = 0.1; // 100ms
         setInterval(() => {
             this.game.tick(TICK_RATE);
         }, TICK_RATE * 1000);
         
+        // Автосохранение каждые 30 секунд
         setInterval(() => {
             Storage.save(this.game.state);
         }, 30000);
     }
     
     formatNumber(num) {
+        if (num === undefined || num === null) return '0';
         if (num < 1000) return Math.floor(num).toString();
         if (num < 1e6) return (num / 1e3).toFixed(1) + 'K';
         if (num < 1e9) return (num / 1e6).toFixed(1) + 'M';
