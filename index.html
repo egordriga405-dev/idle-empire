@@ -14,13 +14,14 @@
             <div class="resource-display" id="gems-display">💎 <span id="gems-amount">0</span></div>
         </header>
         
-        <nav id="tab-bar">
-            <button class="tab-btn active" data-tab="main">🏠</button>
-            <button class="tab-btn" data-tab="generators">🏗️</button>
-            <button class="tab-btn" data-tab="upgrades">⬆️</button>
-            <button class="tab-btn" data-tab="prestige">🌟</button>
-            <button class="tab-btn" data-tab="settings">⚙️</button>
-        </nav>
+       <nav id="tab-bar">
+    <button class="tab-btn active" data-tab="main">🏠</button>
+    <button class="tab-btn" data-tab="generators">🏗️</button>
+    <button class="tab-btn" data-tab="upgrades">⬆️</button>
+    <button class="tab-btn" data-tab="missions">📋</button>
+    <button class="tab-btn" data-tab="prestige">🌟</button>
+    <button class="tab-btn" data-tab="settings">⚙️</button>
+</nav> 
         
         <main id="content">
             <div class="tab-content active" id="tab-main">
@@ -46,11 +47,12 @@
                     <p id="daily-amount">+100 🪙</p>
                     <button id="claim-daily">Забрать</button>
                 </div>
-                <div class="missions-preview" id="missions-list"></div>
+                <div id="missions-list"></div>
             </div>
             
             <div class="tab-content" id="tab-generators"></div>
             <div class="tab-content" id="tab-upgrades"></div>
+            <div class="tab-content" id="tab-missions"></div>
             <div class="tab-content" id="tab-prestige"></div>
             <div class="tab-content" id="tab-settings"></div>
         </main>
